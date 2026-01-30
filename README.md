@@ -48,7 +48,28 @@ python main.py
 
 ![Performance Summary](performance_plot.png)
 
-## 📄 Citation
+## � Paper Status Update (Jan 30, 2026)
+
+**Author Response Received**: The KASPER paper is currently under peer 
+review at TMLR (Transactions on Machine Learning Research).
+
+**OpenReview Submission**: [OpenReview: PD4jGJQtL8](https://openreview.net/forum?id=PD4jGJQtL8)
+- **Submission #**: 5467
+- **Status**: Under review (received 30-40 reviewer comments)
+- **Expected Updated Version**: February-March 2026
+
+**Our Approach**: We are continuing implementation and will update this 
+repository when the revised paper is published with reviewer-requested 
+clarifications.
+
+### 🔄 Follow Progress
+- Watch this repo for updates
+- Monitor the OpenReview page for public comments
+- Check arXiv for revised version (v2)
+
+**Last Checked**: January 30, 2026
+
+## �📄 Citation
 
 Based on the research paper:
 *Pranav Suthar, et al. "KASPER: Kernel-based Adaptive Spline-activated Probabilistic Extreme Regime for Financial Forecasting." ArXiv, 2025.*
