@@ -28,6 +28,45 @@ def contrastive_loss(embeddings, regime_probs, margin=1.0, lambda_gp=0.1):
     
     return loss.mean() + lambda_gp * gradient_penalty
 
+def contrastive_regime_loss(regime_probs, y_true, margin=0.5):
+    """
+    Simplified contrastive loss for ablation studies.
+    Pushes samples with opposite return signs into different regimes.
+    
+    Args:
+        regime_probs: (batch, n_regimes) - soft regime assignments
+        y_true: (batch,) - true returns
+        margin: float - margin for contrastive separation
+    
+    Returns:
+        loss: scalar - contrastive regime loss
+    """
+    batch_size = y_true.size(0)
+    
+    # Determine if returns are positive or negative
+    signs = torch.sign(y_true)  # +1, 0, or -1
+    
+    # Pairwise sign agreement: 1 if same sign, 0 otherwise
+    # sign_agreement[i,j] = 1 if sign[i] == sign[j] and both != 0
+    sign_matrix = signs.unsqueeze(1) * signs.unsqueeze(0)  # (batch, batch)
+    same_sign = (sign_matrix > 0).float()  # 1 if same sign, 0 otherwise
+    
+    # Regime similarity: dot product of regime probabilities
+    # regime_sim[i,j] = sum_k prob[i,k] * prob[j,k]
+    regime_sim = torch.matmul(regime_probs, regime_probs.t())  # (batch, batch)
+    
+    # Contrastive loss:
+    # - If same sign: encourage high regime similarity (minimize (1 - sim)^2)
+    # - If different sign: encourage low regime similarity (minimize sim^2)
+    loss = same_sign * torch.pow(1.0 - regime_sim, 2) + \
+           (1 - same_sign) * torch.pow(regime_sim, 2)
+    
+    # Average over all pairs (excluding diagonal)
+    mask = (1 - torch.eye(batch_size, device=y_true.device))  # Exclude self-pairs
+    loss = (loss * mask).sum() / (mask.sum() + 1e-8)
+    
+    return loss
+
 def orthogonality_loss(weights):
     """
     Enforces orthogonality on weights: ||W W^T - I||^2_F
