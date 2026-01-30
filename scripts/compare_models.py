@@ -1,12 +1,13 @@
-import torch
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from kasper_model import KASPEREnsemble
-from baselines import PatchTST, DLinear, train_baseline
-from trainer import ForecasterTrainer
-from data_utils import load_yahoo_finance_data, engineer_features, prepare_data
-from metrics import calculate_statistical_metrics, calculate_financial_metrics
+import sys
+import os
+# Add root to sys.path for script execution
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.kasper.models.kasper_model import KASPEREnsemble
+from src.kasper.models.baselines import PatchTST, DLinear, train_baseline
+from src.kasper.training.trainer import ForecasterTrainer
+from src.kasper.utils.data_utils import load_yahoo_finance_data, engineer_features, prepare_data
+from src.kasper.utils.metrics import calculate_statistical_metrics, calculate_financial_metrics
 
 def compare_models(ticker="^DJI"):
     print(f"=== Head-to-Head Comparison: {ticker} ===")
@@ -25,7 +26,7 @@ def compare_models(ticker="^DJI"):
     
     # 2. Initialize Models
     models = {
-        'KASPER': KASPEREnsemble(input_dim=input_dim, hidden_dim=128, n_regimes=3, n_models=3),
+        'KASPER': KASPEREnsemble(input_dim=input_dim, hidden_dim=256, n_regimes=4, n_models=5),
         'PatchTST': PatchTST(input_dim=input_dim),
         'DLinear': DLinear(input_dim=input_dim)
     }
@@ -38,7 +39,7 @@ def compare_models(ticker="^DJI"):
         print(f"\n--- Training {name} ---")
         if name == 'KASPER':
             model.fit_knots(torch.FloatTensor(X_train))
-            trainer = ForecasterTrainer(model, patience=25)
+            trainer = ForecasterTrainer(model, patience=40)
             model = trainer.fit(X_train, y_train, X_val, y_val, epochs=100)
         else:
             model = train_baseline(model, X_train, y_train, X_val, y_val, epochs=100)

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from losses import composite_loss
+from .losses import composite_loss
 from torch.optim.lr_scheduler import LambdaLR
 
 class ForecasterTrainer:
@@ -30,10 +30,10 @@ class ForecasterTrainer:
             self.optimizer, factor=0.7, patience=7
         )
         
-        # Temperature Annealing parameters (Fix 1)
-        self.initial_temperature = 1.0
-        self.final_temperature = 0.3
-        self.temperature_decay = 0.95
+        # Temperature Annealing parameters (Diagnosis Fix 2)
+        self.initial_temperature = 2.0
+        self.final_temperature = 0.5
+        self.temperature_decay = 0.98
         
         self.patience = patience
         self.best_val_loss = float('inf')
@@ -124,9 +124,9 @@ class ForecasterTrainer:
             train_loss = self.train_epoch(train_loader, epoch)
             val_loss = self.validate(val_loader)
             
-            # Update sparsity mask every 10 epochs as per paper
-            if (epoch + 1) % 10 == 0:
-                self.model.update_sparsity(threshold=0.01)
+            # Update sparsity mask every 10 epochs as per paper (Diagnosis Fix 3)
+            if (epoch + 1) % 10 == 0 and epoch > 50:
+                self.model.update_sparsity(threshold=0.001)
                 
             # Refine forecasting knots after Layer 1 embeddings stabilize (Epoch 5)
             if epoch == 5:

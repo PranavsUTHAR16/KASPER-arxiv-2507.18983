@@ -118,7 +118,7 @@ def engineer_features(data):
     
     return df_features, df['target']
 
-def prepare_data(X, y, k=8):
+def prepare_data(X, y, k=15):
     """
     Applies train-val-test split, feature selection, and standardization.
     Split: 70% train, 15% validation, 15% test (temporal order preserved).

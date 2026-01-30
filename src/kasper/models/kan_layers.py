@@ -89,6 +89,12 @@ class RegimeDetectionLayer(nn.Module):
         self.regime_logits = nn.Linear(hidden_dim, n_regimes, bias=False)
         self.temperature = temperature
         
+        # Initialize regime logits with ORTHOGONAL weights (Diagnosis Fix 7)
+        with torch.no_grad():
+            nn.init.orthogonal_(self.regime_logits.weight)
+            # Scale up to ensure strong initial separation
+            self.regime_logits.weight.data *= 3.0
+        
     def orthogonality_loss(self):
         """Computes ||W * W^T - I||^2_F on regime logits weights"""
         W = self.regime_logits.weight # (n_regimes, hidden_dim)
@@ -133,7 +139,8 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         self.spline_order = spline_order
         
         # Forecasting coefficients: (n_regimes, hidden_dim, n_basis)
-        self.coeffs = nn.Parameter(torch.randn(n_regimes, hidden_dim, n_basis_functions) * 0.5)
+        # Phase 3: "Middle Ground" scale (0.05) to increase variance
+        self.coeffs = nn.Parameter(torch.randn(n_regimes, hidden_dim, n_basis_functions) * 0.05)
         
         # Knots are REGIME-SPECIFIC and per-feature as per Fig 1
         n_knots = n_basis_functions + spline_order + 1

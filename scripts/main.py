@@ -1,13 +1,18 @@
 import torch
 import numpy as np
 import pandas as pd
-from data_utils import load_yahoo_finance_data, engineer_features, prepare_data
-from kasper_model import KASPER
-from trainer import ForecasterTrainer
-from metrics import calculate_statistical_metrics, calculate_financial_metrics
-from interpretability import extract_regime_rules
 import matplotlib.pyplot as plt
 import random
+import sys
+import os
+
+# Add root to sys.path for script execution
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.kasper.utils.data_utils import load_yahoo_finance_data, engineer_features, prepare_data
+from src.kasper.models.kasper_model import KASPER, KASPEREnsemble
+from src.kasper.training.trainer import ForecasterTrainer
+from src.kasper.utils.metrics import calculate_statistical_metrics, calculate_financial_metrics
 
 def set_seed(seed):
     random.seed(seed)
@@ -26,7 +31,7 @@ def main():
     raw_data = load_yahoo_finance_data(
         ticker=ticker, 
         start="2018-01-01",  # Paper's start date
-        end="2023-12-31"     # Paper's end date
+        end="2025-12-31"     # Paper's end date
     )
     
     X, y = engineer_features(raw_data)
@@ -50,16 +55,22 @@ def main():
         set_seed(seed)
         
         input_dim = X_train.shape[1]
-        # Use Ensemble of 3 models (Fix 8) with hidden=128 (Fix 4)
-        from kasper_model import KASPEREnsemble
-        model = KASPEREnsemble(input_dim=input_dim, hidden_dim=128, n_regimes=3, n_models=3) 
+        # Phase 3: Middle Ground Capacity (128)
+        model = KASPEREnsemble(
+            input_dim=input_dim, 
+            hidden_dim=128, 
+            n_regimes=3, 
+            n_models=4, 
+            n_basis=15
+        ) 
         model.fit_knots(torch.FloatTensor(X_train))
         
-        trainer = ForecasterTrainer(model, patience=25)
+        # Training Hyperparameter Adjustments
+        trainer = ForecasterTrainer(model, lr=0.0005, patience=40)
         model = trainer.fit(
             X_train, y_train, X_val, y_val, 
-            epochs=100,      
-            batch_size=32    
+            epochs=200,      
+            batch_size=64    
         )
         
         model.eval()
@@ -73,6 +84,23 @@ def main():
         y_test_true = scaler_y.inverse_transform(
             y_test.reshape(-1, 1)
         ).flatten()
+        
+        # Advanced Diagnostics (Diagnosis Section: Advanced Diagnostics)
+        print(f"\n--- Prediction Diagnostics ---")
+        print(f"y_test_pred stats: mean={y_test_pred.mean():.6f}, std={y_test_pred.std():.6f}")
+        print(f"y_test_true stats: mean={y_test_true.mean():.6f}, std={y_test_true.std():.6f}")
+        print(f"Prediction range: [{y_test_pred.min():.6f}, {y_test_pred.max():.6f}]")
+        print(f"Actual range: [{y_test_true.min():.6f}, {y_test_true.max():.6f}]")
+
+        if y_test_pred.std() < 0.5 * y_test_true.std():
+            print("⚠️ WARNING: Predictions are too conservative (low variance)")
+
+        # Check regime health
+        regime_assignments = test_regime_probs.argmax(dim=1).cpu().numpy()
+        for r in range(model.n_regimes):
+            count = (regime_assignments == r).sum()
+            pct = 100 * count / len(regime_assignments)
+            print(f"Regime {r}: {count}/{len(regime_assignments)} samples ({pct:.1f}%)")
         
         stats = calculate_statistical_metrics(y_test_true, y_test_pred)
         finance = calculate_financial_metrics(y_test_true, y_test_pred)
@@ -113,6 +141,7 @@ def main():
     
     # 5. Interpretability
     print("\nStep 5: Extracting Regime Rules with Temporal Weighting (Eq 26)...")
+    from src.kasper.models.interpretability import extract_regime_rules
     regime_rules = extract_regime_rules(model, X_test, selected_features, gamma=0.9)
     for regime, rules in regime_rules.items():
         print(f"Regime {regime}: {' + '.join(rules)} -> Future Return")

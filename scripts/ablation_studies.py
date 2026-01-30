@@ -21,17 +21,16 @@ Key Findings from Reviewer Response:
 This script implements these ablation experiments and generates diagnostic visualizations.
 """
 
-import torch
-import torch.nn as nn
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-from copy import deepcopy
-from kasper_model import KASPER, KASPEREnsemble
-from trainer import ForecasterTrainer
-from data_utils import load_yahoo_finance_data, engineer_features, prepare_data
-from metrics import calculate_statistical_metrics, calculate_financial_metrics
-from losses import orthogonality_loss, contrastive_loss
+import sys
+import os
+# Add root to sys.path for script execution
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.kasper.models.kasper_model import KASPER, KASPEREnsemble
+from src.kasper.training.trainer import ForecasterTrainer
+from src.kasper.utils.data_utils import load_yahoo_finance_data, engineer_features, prepare_data
+from src.kasper.utils.metrics import calculate_statistical_metrics, calculate_financial_metrics
+from src.kasper.training.losses import orthogonality_loss, contrastive_loss
 
 
 class KASPERAblation(nn.Module):
@@ -41,7 +40,7 @@ class KASPERAblation(nn.Module):
     - Orthogonality regularization (L_orth)
     - Contrastive loss (L_contrast)
     """
-    def __init__(self, input_dim, hidden_dim=128, n_regimes=3, n_basis=20, 
+    def __init__(self, input_dim, hidden_dim=256, n_regimes=4, n_basis=15, 
                  use_orthogonality=True, use_contrastive=True):
         super(KASPERAblation, self).__init__()
         
@@ -130,7 +129,7 @@ def train_ablation_model(model, X_train, y_train, X_val, y_val,
     y_val_t = torch.FloatTensor(y_val)
     
     best_val_loss = float('inf')
-    patience = 25
+    patience = 40
     patience_counter = 0
     best_state = None
     
@@ -322,8 +321,8 @@ def run_ablation_experiments(ticker="^DJI"):
         # Initialize model
         model = KASPERAblation(
             input_dim=input_dim,
-            hidden_dim=128,
-            n_regimes=3,
+            hidden_dim=256,
+            n_regimes=4,
             **config_params
         )
         

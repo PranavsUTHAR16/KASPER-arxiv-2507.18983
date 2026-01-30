@@ -1,11 +1,12 @@
-import torch
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import TimeSeriesSplit
-from kasper_model import KASPER, KASPEREnsemble
-from trainer import ForecasterTrainer
-from metrics import calculate_statistical_metrics, calculate_financial_metrics, calculate_sharpe
-from data_utils import load_yahoo_finance_data, engineer_features, prepare_data
+import sys
+import os
+# Add root to sys.path for script execution
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.kasper.models.kasper_model import KASPER, KASPEREnsemble
+from src.kasper.training.trainer import ForecasterTrainer
+from src.kasper.utils.metrics import calculate_statistical_metrics, calculate_financial_metrics, calculate_sharpe
+from src.kasper.utils.data_utils import load_yahoo_finance_data, engineer_features, prepare_data
 
 def purged_walk_forward(X, y, gap_days=5, n_splits=5):
     """
@@ -50,11 +51,11 @@ def purged_walk_forward(X, y, gap_days=5, n_splits=5):
         X_test_scaled = scaler_X.transform(X_test_selected)
         y_test_scaled = scaler_y.transform(y_test_raw.values.reshape(-1, 1)).flatten()
         
-        # Initialize and train Ensemble (for stability)
-        model = KASPEREnsemble(input_dim=X_train.shape[1], hidden_dim=128, n_regimes=3, n_models=3)
+        # Initialize and train Ensemble (for stability) - Updated Capacity
+        model = KASPEREnsemble(input_dim=X_train.shape[1], hidden_dim=256, n_regimes=4, n_models=5, n_basis=15)
         model.fit_knots(torch.FloatTensor(X_train))
         
-        trainer = ForecasterTrainer(model, patience=15)
+        trainer = ForecasterTrainer(model, patience=40)
         model = trainer.fit(X_train, y_train, X_val, y_val, epochs=50)
         
         # Evaluate

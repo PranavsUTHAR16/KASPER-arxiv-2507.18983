@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
-from kan_layers import RegimeDetectionLayer, RegimeAdaptiveForecastingLayer
+from .kan_layers import RegimeDetectionLayer, RegimeAdaptiveForecastingLayer
 
 class KASPER(nn.Module):
     """
     KASPER: Kolmogorov-Arnold Network for Sensitive Prediction and Evolutionary Regime-shifting.
     Integrates two layers of KAN for regime-adaptive stock forecasting.
     """
-    def __init__(self, input_dim=8, hidden_dim=64, n_regimes=3, n_basis=10):
+    def __init__(self, input_dim=15, hidden_dim=128, n_regimes=3, n_basis=15):
         super(KASPER, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -65,7 +65,7 @@ class KASPEREnsemble(nn.Module):
     KASPER Ensemble for variance reduction (Fix 8).
     Averages predictions and regime probabilities across multiple KASPER instances.
     """
-    def __init__(self, input_dim=8, hidden_dim=64, n_regimes=3, n_models=3, n_basis=10):
+    def __init__(self, input_dim=15, hidden_dim=128, n_regimes=3, n_models=4, n_basis=15):
         super(KASPEREnsemble, self).__init__()
         self.n_regimes = n_regimes
         self.models = nn.ModuleList([

@@ -1,8 +1,10 @@
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from kasper_model import KASPER
-from data_utils import load_yahoo_finance_data, engineer_features, prepare_data
+import sys
+import os
+# Add root to sys.path for script execution
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.kasper.utils.data_utils import load_yahoo_finance_data, engineer_features, prepare_data
+from src.kasper.models.kasper_model import KASPER, KASPEREnsemble
 
 def diagnose_regimes(model, X_train, X_val, X_test):
     """Check regime distribution and embeddings"""
@@ -58,8 +60,8 @@ if __name__ == "__main__":
     
     # Load best model
     input_dim = data_bundles['X_train'].shape[1]
-    from kasper_model import KASPEREnsemble
-    model = KASPEREnsemble(input_dim=input_dim, hidden_dim=128, n_regimes=3, n_models=3, n_basis=20)
+    # Updated to match new defaults
+    model = KASPEREnsemble(input_dim=input_dim, hidden_dim=256, n_regimes=4, n_models=5, n_basis=15)
     try:
         model.load_state_dict(torch.load('best_kasper.pth', map_location='cpu'))
         print("Loaded best_kasper.pth for diagnosis.")

@@ -114,8 +114,10 @@ def regime_balance_loss(regime_probs):
 
 def composite_loss(y_pred, y_true, embeddings, regime_probs, model, 
                    delta=1.0, 
-                   lambda_contr=0.01, lambda_l1=0.001, 
-                   lambda_orth=0.05, lambda_balance=0.15):
+                   lambda_contr=0.05,      # ⬆️ Increased from 0.01
+                   lambda_l1=0.0005,        # ⬇️ Relaxed for Phase 3 (Variance Scaling)
+                   lambda_orth=0.15,        # ⬆️ Increased from 0.05
+                   lambda_balance=0.30):    # ⬆️ Increased from 0.15
     """
     Full training objective: L = Huber + L1 + Contrastive + Orthogonal + Balance
     Updated with stronger orthogonality (Fix #3) and regime collapse detection.
