@@ -19,23 +19,39 @@ class SplineActivation(nn.Module):
         # Learnable parameters for cubic component
         self.v_cubic = nn.Parameter(torch.randn(input_dim, n_cubic))
         
-        # Knots for spline (initialized later)
-        self.register_buffer('knots', torch.linspace(-1, 1, n_linear + 1))
+        # Per-feature knots (Fix 3)
+        self.register_buffer(
+            'knots', 
+            torch.linspace(-1, 1, n_linear + 1).unsqueeze(0).repeat(input_dim, 1)
+        )
         
     def fit_knots(self, x):
-        """Initializes knots based on quantiles of the input data."""
+        """
+        Initializes knots PER FEATURE using 1st-99th percentiles (as per author response).
+        Ensures robust scaling for financial return distributions.
+        """
         with torch.no_grad():
-            quantiles = torch.linspace(0, 1, self.n_linear + 1, device=x.device)
-            new_knots = torch.quantile(x, quantiles, dim=0).T # (input_dim, n_linear+1)
-            self.knots.data = new_knots
+            for i in range(self.input_dim):
+                # Use 1st and 99th percentile as bounds
+                p_low = torch.quantile(x[:, i], 0.01)   # 1st percentile
+                p_high = torch.quantile(x[:, i], 0.99)  # 99th percentile
+                
+                # Place knots uniformly between bounds (as per Eq 21 clarification)
+                knot_positions = torch.linspace(0, 1, self.n_linear + 1, device=x.device)
+                self.knots.data[i] = p_low + knot_positions * (p_high - p_low)
+                
+                # Optional logging for knot health
+                if i < 3: # Log first 3 features
+                    print(f"  Feature {i}: knots initialized from {p_low:.4f} to {p_high:.4f}")
         
     def forward(self, x):
         # x: (batch, input_dim)
         x_expanded = x.unsqueeze(-1) # (batch, in, 1)
-        knots_expanded = self.knots.unsqueeze(0) # (1, in, n_linear+1)
+        # knots_expanded: (1, in, n_linear+1) matches self.knots if expanded correctly
+        knots_expanded = self.knots.unsqueeze(0) 
         
         # Equation 15: Linear Component (Piecewise Linear Ramp)
-        # ReLU(x - ki) - ReLU(x - ki+1) creates a linear basis segment
+        # Using per-feature knots
         diffs = F.relu(x_expanded - knots_expanded[:, :, :-1]) - F.relu(x_expanded - knots_expanded[:, :, 1:])
         linear_out = torch.sum(torch.tanh(self.w_linear).unsqueeze(0) * diffs, dim=-1)
         
@@ -126,6 +142,9 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         for r in range(n_regimes):
             for h in range(hidden_dim):
                 self.knots.data[r, h] = torch.linspace(-3, 3, n_knots)
+        
+        # Add BatchNorm BEFORE spline transformation (Fix 7)
+        self.bn = nn.BatchNorm1d(hidden_dim)
         
         # Sparsity mask (for dynamic pruning)
         self.register_buffer('sparsity_mask', torch.ones_like(self.coeffs))
@@ -289,7 +308,11 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         # h: (batch, hidden_dim)
         # regime_probs: (batch, n_regimes)
         
-        # 1. Compute basis functions for ALL regimes (potentially different knots)
+        # Apply batch norm (Fix 7)
+        if self.training and h.size(0) > 1:
+            h = self.bn(h)
+        
+        # 1. Compute basis functions for ALL regimes
         # phi: (n_regimes, batch, hidden_dim, n_basis)
         phi = self.b_spline_basis(h.unsqueeze(-1), self.spline_order)
         

@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from losses import composite_loss
+from torch.optim.lr_scheduler import LambdaLR
 
 class ForecasterTrainer:
     def __init__(self, model, lr=0.001, weight_decay=1e-5, patience=15):
@@ -12,12 +13,27 @@ class ForecasterTrainer:
         self.model.to(self.device)
         
         # AdamW as per paper Table I
-        self.optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+        self.optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        
+        # Add warmup scheduler (Fix 5)
+        def lr_lambda(epoch):
+            warmup_epochs = 10
+            if epoch < warmup_epochs:
+                return (epoch + 1) / warmup_epochs
+            else:
+                return 1.0
+        
+        self.warmup_scheduler = LambdaLR(self.optimizer, lr_lambda)
         
         # Scheduler: factor 0.7, patience 7 as per Table I
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        self.plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, factor=0.7, patience=7
         )
+        
+        # Temperature Annealing parameters (Fix 1)
+        self.initial_temperature = 1.0
+        self.final_temperature = 0.3
+        self.temperature_decay = 0.95
         
         self.patience = patience
         self.best_val_loss = float('inf')
@@ -27,17 +43,23 @@ class ForecasterTrainer:
         self.model.train()
         epoch_losses = []
         epoch_details = []
-        regime_distribution = []
+        regime_counts = torch.zeros(self.model.n_regimes)
         
-        # Anneal temperature: start at 1.0, decay to 0.5 as suggested in review
-        temperature = max(0.5, 1.0 * (0.95 ** epoch))
-        self.model.regime_detection.temperature = temperature
+        # CRITICAL: Anneal temperature to prevent regime collapse (Fix 1)
+        current_temp = max(
+            self.final_temperature,
+            self.initial_temperature * (self.temperature_decay ** epoch)
+        )
+        self.model.temperature = current_temp
         
         for batch_x, batch_y in train_loader:
             batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
             self.optimizer.zero_grad()
             
             y_pred, regime_probs, embeddings = self.model(batch_x)
+            
+            # Track regime distribution
+            regime_counts += regime_probs.argmax(dim=1).bincount(minlength=self.model.n_regimes).cpu()
             
             loss, loss_details = composite_loss(
                 y_pred, batch_y, embeddings, regime_probs, self.model
@@ -52,19 +74,13 @@ class ForecasterTrainer:
             epoch_losses.append(loss.item())
             epoch_details.append(loss_details)
             
-            # Track regime distribution
-            regime_distribution.append(
-                regime_probs.argmax(dim=1).cpu().numpy()
-            )
-            
         # Logging regime balance
-        all_regimes = np.concatenate(regime_distribution)
-        dist = np.bincount(all_regimes, minlength=self.model.n_regimes)
+        regime_dist = (regime_counts / regime_counts.sum()).numpy()
         
         if epoch_details:
             avg_losses = {k: np.mean([d[k] for d in epoch_details]) for k in epoch_details[0]}
             loss_str = " ".join([f"{k}:{v:.3f}" for k, v in avg_losses.items()])
-            print(f"  Regime dist: {dist} | Temp: {temperature:.3f}")
+            print(f"  Regime dist: {regime_dist} | Temp: {current_temp:.3f}")
             print(f"  Losses -> {loss_str}")
         
         return np.mean(epoch_losses)
@@ -117,7 +133,11 @@ class ForecasterTrainer:
                 with torch.no_grad():
                     all_x = train_loader.dataset.tensors[0].to(self.device)
                     _, r_probs, embeddings = self.model(all_x)
-                    self.model.forecasting.fit_knots(embeddings, r_probs)
+                    if hasattr(self.model, 'models'):
+                        for m in self.model.models:
+                            m.forecasting.fit_knots(embeddings, r_probs)
+                    else:
+                        self.model.forecasting.fit_knots(embeddings, r_probs)
                 self.model.train()
             
             # Grid extension (Coarse-to-fine refinement) after stable knots found (Epoch 20)
@@ -127,15 +147,24 @@ class ForecasterTrainer:
                 with torch.no_grad():
                     all_x = train_loader.dataset.tensors[0].to(self.device)
                     _, _, embeddings = self.model(all_x)
-                    self.model.forecasting.grid_extension(20, h_samples=embeddings)
+                    if hasattr(self.model, 'models'):
+                        for m in self.model.models:
+                            m.forecasting.grid_extension(20, h_samples=embeddings)
+                    else:
+                        self.model.forecasting.grid_extension(20, h_samples=embeddings)
                 self.model.train()
                 # Update optimizer to include new parameters from grid extension
                 self.optimizer = optim.AdamW(self.model.parameters(), lr=self.optimizer.param_groups[0]['lr'], weight_decay=1e-5)
+                # Re-wrap warmup scheduler for consistency if needed, but we're past 10 epochs
                 # Save as new best to ensure shape matches on subsequent loads
                 self.best_val_loss = val_loss
                 torch.save(self.model.state_dict(), 'best_kasper.pth')
                 
-            self.scheduler.step(val_loss)
+            # Update schedulers (Fix 5)
+            if epoch < 10:
+                self.warmup_scheduler.step()
+            else:
+                self.plateau_scheduler.step(val_loss)
             
             print(f"Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}")
             

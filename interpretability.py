@@ -30,17 +30,28 @@ def compute_monte_carlo_shapley_batched(model, sample, regime_idx, n_iterations=
                 batch_with[b, i] = sample[0, i]
                 batch_without[b, S] = sample[0, S]
                 
-            # Get embeddings for the whole batch
-            _, embeddings_with = model.regime_detection(batch_with)
-            _, embeddings_without = model.regime_detection(batch_without)
-            
-            # Get regime predictions
-            phi_with = model.forecasting.b_spline_basis(embeddings_with.unsqueeze(-1), model.forecasting.spline_order)
-            masked_coeff = model.forecasting.coeffs[regime_idx] * model.forecasting.sparsity_mask[regime_idx]
-            preds_with = torch.sum(masked_coeff * phi_with, dim=(-1, -2))
-            
-            phi_without = model.forecasting.b_spline_basis(embeddings_without.unsqueeze(-1), model.forecasting.spline_order)
-            preds_without = torch.sum(masked_coeff * phi_without, dim=(-1, -2))
+            # Get predictions for the whole batch
+            if hasattr(model, 'models'):
+                # For ensembles, we use the forward pass directly
+                _, regime_probs, embeddings = model(batch_with)
+                phi_with = model.models[0].forecasting.b_spline_basis(embeddings.unsqueeze(-1), model.models[0].forecasting.spline_order)
+                masked_coeff = model.models[0].forecasting.coeffs[regime_idx] * model.models[0].forecasting.sparsity_mask[regime_idx]
+                preds_with = torch.sum(masked_coeff * phi_with, dim=(-1, -2))
+                
+                _, _, embeddings_without = model(batch_without)
+                phi_without = model.models[0].forecasting.b_spline_basis(embeddings_without.unsqueeze(-1), model.models[0].forecasting.spline_order)
+                preds_without = torch.sum(masked_coeff * phi_without, dim=(-1, -2))
+            else:
+                _, embeddings_with = model.regime_detection(batch_with)
+                _, embeddings_without = model.regime_detection(batch_without)
+                
+                # Get regime predictions
+                phi_with = model.forecasting.b_spline_basis(embeddings_with.unsqueeze(-1), model.forecasting.spline_order)
+                masked_coeff = model.forecasting.coeffs[regime_idx] * model.forecasting.sparsity_mask[regime_idx]
+                preds_with = torch.sum(masked_coeff * phi_with, dim=(-1, -2))
+                
+                phi_without = model.forecasting.b_spline_basis(embeddings_without.unsqueeze(-1), model.forecasting.spline_order)
+                preds_without = torch.sum(masked_coeff * phi_without, dim=(-1, -2))
             
             # Mean difference
             shapley_values[i] = torch.mean(preds_with - preds_without).item()
@@ -55,7 +66,8 @@ def extract_regime_rules(model, X_test, feature_names, n_samples=50, gamma=0.9):
     model.eval()
     with torch.no_grad():
         X_tensor = torch.FloatTensor(X_test)
-        regime_probs, _ = model.regime_detection(X_tensor)
+        # Use direct call instead of .regime_detection to support ensembles
+        _, regime_probs, _ = model(X_tensor)
         regime_assignments = torch.argmax(regime_probs, dim=1)
         
     n_regimes = model.n_regimes

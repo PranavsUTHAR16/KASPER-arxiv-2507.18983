@@ -2,10 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def contrastive_loss(embeddings, regime_probs, margin=1.0):
+def contrastive_loss(embeddings, regime_probs, margin=1.0, lambda_gp=0.1):
     """
     Enforces separation between different regimes in the latent space.
     Uses soft regime probabilities to weight the distances.
+    Includes gradient penalty to prevent embedding collapse.
     """
     # pairwise distances between embeddings
     # embeddings: (batch, hidden_dim)
@@ -21,7 +22,11 @@ def contrastive_loss(embeddings, regime_probs, margin=1.0):
     loss = similarity * torch.pow(dist_matrix, 2) + \
            (1 - similarity) * torch.pow(F.relu(margin - dist_matrix), 2)
            
-    return loss.mean()
+    # Add gradient penalty to prevent embedding collapse (encourage unit norm)
+    embedding_norm = torch.norm(embeddings, p=2, dim=1).mean()
+    gradient_penalty = torch.abs(embedding_norm - 1.0)
+    
+    return loss.mean() + lambda_gp * gradient_penalty
 
 def orthogonality_loss(weights):
     """
@@ -71,10 +76,10 @@ def regime_balance_loss(regime_probs):
 def composite_loss(y_pred, y_true, embeddings, regime_probs, model, 
                    delta=1.0, 
                    lambda_contr=0.01, lambda_l1=0.001, 
-                   lambda_orth=0.01, lambda_balance=0.05):
+                   lambda_orth=0.05, lambda_balance=0.15):
     """
     Full training objective: L = Huber + L1 + Contrastive + Orthogonal + Balance
-    Based on paper Table I weights.
+    Updated with stronger orthogonality (Fix #3) and regime collapse detection.
     """
     # Huber Loss for robustness
     l_huber = F.huber_loss(y_pred.squeeze(), y_true.squeeze(), delta=delta)
@@ -83,14 +88,39 @@ def composite_loss(y_pred, y_true, embeddings, regime_probs, model,
     l_contr = contrastive_loss(embeddings, regime_probs)
     
     # L1 Regularization (Sparsity on forecasting coefficients)
-    l_sparse = torch.sum(torch.abs(model.forecasting.coeffs))
+    # Handle Ensembles
+    if hasattr(model, 'models'):
+        l_sparse = sum(torch.sum(torch.abs(m.forecasting.coeffs)) for m in model.models) / len(model.models)
+    else:
+        l_sparse = torch.sum(torch.abs(model.forecasting.coeffs))
     
     # Orthogonality Constraint
     l_orth = model.get_orthogonality_loss()
     
-    # Balance Loss (KL Divergence from uniform)
+    # Balance Loss
     l_balance = regime_balance_loss(regime_probs)
     
+    # DETECT REGIME COLLAPSE (Reviewer-driven Fix #3)
+    # If any regime is ignored (max prob never points to it), heavily penalize
+    regime_assignments = regime_probs.argmax(dim=1)
+    unique_regimes = torch.unique(regime_assignments)
+    
+    if len(unique_regimes) < model.n_regimes:
+        # Regime collapse detected - HEAVILY penalize
+        if model.training: # Only print during training to avoid terminal spam
+            print(f"  ⚠️ WARNING: Regime collapse detected ({len(unique_regimes)}/{model.n_regimes} active). Applying 5x penalty.")
+        lambda_orth *= 5.0
+        lambda_balance *= 5.0
+    
+    # Dynamic Entropy Check (additional safeguard)
+    regime_entropy = -torch.sum(
+        regime_probs.mean(dim=0) * torch.log(regime_probs.mean(dim=0) + 1e-8)
+    )
+    max_entropy = torch.log(torch.tensor(regime_probs.size(1), dtype=torch.float))
+    
+    if regime_entropy / max_entropy < 0.5:
+        lambda_balance *= 2.0
+        
     total_loss = l_huber + \
                  lambda_contr * l_contr + \
                  lambda_l1 * l_sparse + \
@@ -102,5 +132,6 @@ def composite_loss(y_pred, y_true, embeddings, regime_probs, model,
         'contrastive': l_contr.item(),
         'l1': l_sparse.item(),
         'orthogonality': l_orth.item(),
-        'balance': l_balance.item()
+        'balance': l_balance.item(),
+        'regime_entropy': regime_entropy.item()
     }

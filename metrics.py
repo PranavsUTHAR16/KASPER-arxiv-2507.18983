@@ -50,3 +50,8 @@ def calculate_financial_metrics(y_true, y_pred, risk_free_rate=0.02):
         'Cumulative Return (%)': cum_returns[-1] * 100 if len(cum_returns) > 0 else 0,
         'Profit Factor': profit_factor
     }
+
+def calculate_sharpe(y_true, y_pred, risk_free_rate=0.02):
+    """Convenience function for walk-forward validation"""
+    metrics = calculate_financial_metrics(y_true, y_pred, risk_free_rate)
+    return metrics['Sharpe Ratio']

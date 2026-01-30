@@ -38,16 +38,6 @@ Run the full pipeline on the Dow Jones (US30) benchmark:
 python main.py
 ```
 
-## 📈 Performance Benchmarks (US30)
-
-| Metric | KASPER Implementation | Research Target |
-| :--- | :--- | :--- |
-| **Statistical MSE** | **0.000062** | 0.000100 |
-| **Sharpe Ratio** | **1.6054** | - |
-| **Win Rate** | **54.55%** | - |
-
-![Performance Summary](performance_plot.png)
-
 ## � Paper Status Update (Jan 30, 2026)
 
 **Author Response Received**: The KASPER paper is currently under peer 
@@ -58,9 +48,21 @@ review at TMLR (Transactions on Machine Learning Research).
 - **Status**: Under review (received 30-40 reviewer comments)
 - **Expected Updated Version**: February-March 2026
 
-**Our Approach**: We are continuing implementation and will update this 
-repository when the revised paper is published with reviewer-requested 
-clarifications.
+### 📑 Key Peer-Review Insights
+
+1. **Missing Ablation Studies Revealed Regime Collapse Issue 🔥**
+   - **Reviewer Critical Point**: "Ablation studies on key modules are missing."
+   - **Authors' Response**: Confirmed that removing orthogonality regularization leads to **regime collapse**, where weights converge to identical representations. We have adjusted our implementation to prevent this.
+
+2. **Feature Definitions Were Unclear (Now Fixed)**
+   - **Reviewer Concern**: "Eq 13 needs actual expressions instead of '...'."
+   - **Status**: Authors have fixed this in the revised Section 4.1. Our data engineering layer now explicitly maps these 15 features.
+
+3. **Knot Initialization Clarified**
+   - **Reviewer Question**: "What is percentile-based initialization?"
+   - **Clarification**: Scaling knots using robust percentile bounds (1st and 99th) of each feature's training distribution: $k_i = p_{low} + \frac{i}{N_{linear}}(p_{high} - p_{low})$.
+
+**Our Approach**: We are continuing implementation based on these reviewer-requested clarifications and will further update when v2 is published.
 
 ### 🔄 Follow Progress
 - Watch this repo for updates
