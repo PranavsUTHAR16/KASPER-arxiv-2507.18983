@@ -107,15 +107,17 @@ class ForecasterTrainer:
         X_val_t = torch.FloatTensor(X_val)
         y_val_t = torch.FloatTensor(y_val)
         
+        # CRITICAL BUG FIX: Enable shuffling for training data
+        # Previous: shuffle=False caused temporal overfitting and negative R²
         train_loader = DataLoader(
             TensorDataset(X_train_t, y_train_t), 
             batch_size=batch_size, 
-            shuffle=False
+            shuffle=True  # ✅ FIXED: Was False, now True
         )
         val_loader = DataLoader(
             TensorDataset(X_val_t, y_val_t), 
             batch_size=batch_size, 
-            shuffle=False
+            shuffle=False  # Validation doesn't need shuffling
         )
         
         for epoch in range(epochs):
