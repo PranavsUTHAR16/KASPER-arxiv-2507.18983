@@ -31,7 +31,7 @@ from kasper_model import KASPER, KASPEREnsemble
 from trainer import ForecasterTrainer
 from data_utils import load_yahoo_finance_data, engineer_features, prepare_data
 from metrics import calculate_statistical_metrics, calculate_financial_metrics
-from losses import orthogonality_loss, contrastive_regime_loss
+from losses import orthogonality_loss, contrastive_loss
 
 
 class KASPERAblation(nn.Module):
@@ -66,7 +66,7 @@ class KASPERAblation(nn.Module):
         """Forward pass with regime information."""
         return self.base_model(x)
     
-    def compute_loss(self, x, y_true, y_pred, regime_probs, regime_weights):
+    def compute_loss(self, x, y_true, y_pred, regime_probs, embeddings):
         """
         Custom loss function for ablation studies.
         
@@ -75,14 +75,14 @@ class KASPERAblation(nn.Module):
             y_true: Ground truth returns (batch,)
             y_pred: Predicted returns (batch,)
             regime_probs: Regime probabilities (batch, n_regimes)
-            regime_weights: Regime-specific weights (batch, n_regimes, weight_dim)
+            embeddings: Latent embeddings (batch, hidden_dim)
             
         Returns:
             loss: Total loss (sum of enabled components)
             loss_components: Dictionary of individual loss values
         """
         # Base prediction loss (always enabled)
-        mse_loss = nn.MSELoss()(y_pred, y_true)
+        mse_loss = torch.nn.functional.mse_loss(y_pred.squeeze(), y_true.squeeze())
         
         loss_components = {
             'mse': mse_loss.item()
@@ -90,19 +90,21 @@ class KASPERAblation(nn.Module):
         
         total_loss = mse_loss
         
-        # Orthogonality regularization (λ_orth = 0.01 from paper)
+        # Orthogonality regularization (λ_orth = 0.05 from paper)
         if self.use_orthogonality:
-            orth_loss = orthogonality_loss(regime_weights) 
-            total_loss = total_loss + 0.01 * orth_loss
+            # Pass coefficients directly
+            orth_loss = orthogonality_loss(self.base_model.forecasting.coeffs) 
+            total_loss = total_loss + 0.05 * orth_loss
             loss_components['orthogonality'] = orth_loss.item()
         else:
             loss_components['orthogonality'] = 0.0
             
-        # Contrastive loss (λ_contrast = 0.1 from paper)
+        # Contrastive loss (λ_contrast = 0.01 from paper)
         if self.use_contrastive:
-            contrast_loss = contrastive_regime_loss(regime_probs, y_true)
-            total_loss = total_loss + 0.1 * contrast_loss
-            loss_components['contrastive'] = contrast_loss.item()
+            # Use the more advanced contrastive_loss on embeddings
+            contr_loss = contrastive_loss(embeddings, regime_probs)
+            total_loss = total_loss + 0.01 * contr_loss
+            loss_components['contrastive'] = contr_loss.item()
         else:
             loss_components['contrastive'] = 0.0
             
@@ -147,11 +149,11 @@ def train_ablation_model(model, X_train, y_train, X_val, y_val,
             optimizer.zero_grad()
             
             # Forward pass
-            y_pred, regime_probs, regime_weights = model(X_batch)
+            y_pred, regime_probs, embeddings = model(X_batch)
             
             # Compute loss with ablation settings
             loss, loss_components = model.compute_loss(
-                X_batch, y_batch, y_pred, regime_probs, regime_weights
+                X_batch, y_batch, y_pred, regime_probs, embeddings
             )
             
             loss.backward()
@@ -166,9 +168,9 @@ def train_ablation_model(model, X_train, y_train, X_val, y_val,
         # Validation
         model.eval()
         with torch.no_grad():
-            val_pred, val_regime_probs, val_regime_weights = model(X_val_t)
+            val_pred, val_regime_probs, val_embeddings = model(X_val_t)
             val_loss, _ = model.compute_loss(
-                X_val_t, y_val_t, val_pred, val_regime_probs, val_regime_weights
+                X_val_t, y_val_t, val_pred, val_regime_probs, val_embeddings
             )
             val_loss_value = val_loss.item()
         
