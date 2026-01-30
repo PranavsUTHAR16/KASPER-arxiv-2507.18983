@@ -31,6 +31,7 @@ def compare_models(ticker="^DJI"):
     }
     
     results = []
+    equity_curves = {}
     
     # 3. Training & Evaluation
     for name, model in models.items():
@@ -54,6 +55,10 @@ def compare_models(ticker="^DJI"):
         y_pred = scaler_y.inverse_transform(y_pred_scaled.cpu().numpy().reshape(-1, 1)).flatten()
         y_true = scaler_y.inverse_transform(y_test.reshape(-1, 1)).flatten()
         
+        # Calculate Equity Curve
+        strategy_rets = np.sign(y_pred) * y_true
+        equity_curves[name] = np.cumprod(1 + strategy_rets)
+        
         stats = calculate_statistical_metrics(y_true, y_pred)
         finance = calculate_financial_metrics(y_true, y_pred)
         
@@ -75,18 +80,33 @@ def compare_models(ticker="^DJI"):
     print(df.to_string(index=False))
     
     # Plotting
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig = plt.figure(figsize=(15, 10))
+    
+    # Sharpe Chart
+    ax1 = plt.subplot(2, 2, 1)
     df.plot(x='Model', y='Sharpe', kind='bar', ax=ax1, color=['#4285F4', '#EA4335', '#FBBC05'])
     ax1.set_title('Sharpe Ratio Comparison')
     ax1.set_ylabel('Sharpe Ratio')
     
+    # R2 Chart
+    ax2 = plt.subplot(2, 2, 2)
     df.plot(x='Model', y='R2', kind='bar', ax=ax2, color=['#4285F4', '#EA4335', '#FBBC05'])
     ax2.set_title('R2 Score Comparison')
     ax2.set_ylabel('R2 Scale')
     
+    # Equity Curve Chart
+    ax3 = plt.subplot(2, 1, 2)
+    for name, curve in equity_curves.items():
+        ax3.plot(curve, label=f"{name} (Final: {curve[-1]:.2f}x)")
+    ax3.set_title('Equity Curve Comparison (Strategy Cumulative Returns)')
+    ax3.set_xlabel('Trading Days')
+    ax3.set_ylabel('Portfolio Value (Baseline=1.0)')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     plt.savefig('comparison_results.png')
-    print("\n✅ Comparison chart saved to comparison_results.png")
+    print("\n✅ Comparison charts (including Equity Curve) saved to comparison_results.png")
 
 if __name__ == "__main__":
     compare_models()
