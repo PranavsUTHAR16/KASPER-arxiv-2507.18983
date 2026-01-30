@@ -119,6 +119,21 @@ class ForecasterTrainer:
                     _, r_probs, embeddings = self.model(all_x)
                     self.model.forecasting.fit_knots(embeddings, r_probs)
                 self.model.train()
+            
+            # Grid extension (Coarse-to-fine refinement) after stable knots found (Epoch 20)
+            if epoch == 20:
+                print("  Performing grid extension (10 -> 20 basis functions)...")
+                self.model.eval()
+                with torch.no_grad():
+                    all_x = train_loader.dataset.tensors[0].to(self.device)
+                    _, _, embeddings = self.model(all_x)
+                    self.model.forecasting.grid_extension(20, h_samples=embeddings)
+                self.model.train()
+                # Update optimizer to include new parameters from grid extension
+                self.optimizer = optim.AdamW(self.model.parameters(), lr=self.optimizer.param_groups[0]['lr'], weight_decay=1e-5)
+                # Save as new best to ensure shape matches on subsequent loads
+                self.best_val_loss = val_loss
+                torch.save(self.model.state_dict(), 'best_kasper.pth')
                 
             self.scheduler.step(val_loss)
             

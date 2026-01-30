@@ -138,110 +138,152 @@ class RegimeAdaptiveForecastingLayer(nn.Module):
         """
         with torch.no_grad():
             regime_assignments = torch.argmax(regime_probs, dim=1)
-            quantiles = torch.linspace(0, 1, self.n_basis + self.spline_order + 1, device=h.device)
+            n_knots = self.n_basis + self.spline_order + 1
+            quantiles = torch.linspace(0, 1, n_knots, device=h.device)
             
             for r in range(self.n_regimes):
                 mask = (regime_assignments == r)
-                if mask.any():
+                if mask.any() and mask.sum() > n_knots:
                     h_r = h[mask]
                     # Quantile normalization per feature for this regime
+                    # Add small epsilon to ensure strictly increasing knots if data is flat
                     new_knots_r = torch.quantile(h_r, quantiles, dim=0).T # (hidden_dim, n_knots)
+                    
+                    # Ensure strictly increasing
+                    diff = new_knots_r[:, 1:] - new_knots_r[:, :-1]
+                    if (diff <= 0).any():
+                        # Add a small trend to ensure separation
+                        epsilon = 1e-4 * torch.arange(n_knots, device=h.device).view(1, -1)
+                        new_knots_r = new_knots_r + epsilon
+                        
                     self.knots.data[r] = new_knots_r
                 else:
-                    # Fallback if no samples (keep existing or use global)
+                    # Fallback if no samples: keep existing or use global range
                     pass
 
-    def grid_extension(self, new_n_basis):
+    def grid_extension(self, new_n_basis, h_samples=None):
         """
-        G1 -> G2 extension as mentioned in Fig 1.
-        Increases the knot resolution while preserving (as much as possible) the learned shape.
+        G1 -> G2 extension as mentioned in KAN paper Fig 1.
+        Increases the knot resolution while preserving the learned function shape using LSQ.
         """
         old_n_basis = self.n_basis
         if new_n_basis <= old_n_basis:
             return
             
-        # 1. Update knots with higher resolution
-        # For simplicity, we interpolate current knots to the new resolution
-        n_knots_new = new_n_basis + self.spline_order + 1
-        new_knots = torch.zeros(self.n_regimes, self.hidden_dim, n_knots_new, device=self.knots.device)
+        print(f"  Extending grid from {old_n_basis} to {new_n_basis} basis functions...")
         
-        for r in range(self.n_regimes):
-            for h in range(self.hidden_dim):
-                # Basic linear interpolation for the new knot sequence
-                old_k = self.knots[r, h]
-                indices = torch.linspace(0, len(old_k)-1, n_knots_new, device=self.knots.device)
-                new_knots[r, h] = torch.lerp(old_k[indices.long()], old_k[torch.clamp(indices.long() + 1, max=len(old_k)-1)], indices % 1)
-        
-        self.knots.data = new_knots
-        
-        # 2. Update coeffs (zero-init or interpolate)
-        new_coeffs = torch.zeros(self.n_regimes, self.hidden_dim, new_n_basis, device=self.coeffs.device)
-        # Note: True grid extension involves least-squares fitting of coeffs to match old function.
-        # Here we'll zero-init the new basis components and keep old ones if they align,
-        # or just random. We'll use random * 0.1 for new capacity.
-        new_coeffs[:, :, :old_n_basis] = self.coeffs.data
-        self.coeffs = nn.Parameter(new_coeffs)
-        self.sparsity_mask = torch.ones_like(self.coeffs)
-        self.n_basis = new_n_basis
+        with torch.no_grad():
+            # 1. Update knots with higher resolution
+            n_knots_new = new_n_basis + self.spline_order + 1
+            new_knots = torch.zeros(self.n_regimes, self.hidden_dim, n_knots_new, device=self.knots.device)
+            
+            for r in range(self.n_regimes):
+                for h_idx in range(self.hidden_dim):
+                    old_k = self.knots[r, h_idx]
+                    # Generate new knots by interpolating old ones (uniform distribution over same range)
+                    new_knots[r, h_idx] = torch.linspace(old_k[0], old_k[-1], n_knots_new, device=self.knots.device)
+            
+            # If h_samples is provided, use LSQ to fit new coefficients
+            if h_samples is not None:
+                # phi_old: (r, n, h, b_old)
+                phi_old = self.b_spline_basis(h_samples.unsqueeze(-1), self.spline_order)
+                # target_values: (r, n, h) = sum_b coeff_old * phi_old
+                # coeffs: (r, h, b)
+                target = torch.einsum('rhb,rnhb->rnh', self.coeffs * self.sparsity_mask, phi_old)
+                
+                # Temporarily update knots to compute new phi
+                original_knots = self.knots.data.clone()
+                original_n_basis = self.n_basis
+                self.knots.data = new_knots
+                self.n_basis = new_n_basis
+                
+                # phi_new: (r, n, h, b_new)
+                phi_new = self.b_spline_basis(h_samples.unsqueeze(-1), self.spline_order)
+                
+                # Solve LSQ for each regime and hidden dimension
+                # phi_new_flat: (r*h, n, b_new), target_flat: (r*h, n)
+                phi_new_flat = phi_new.permute(0, 2, 1, 3).reshape(-1, h_samples.size(0), new_n_basis)
+                target_flat = target.permute(0, 2, 1).reshape(-1, h_samples.size(0))
+                
+                # Robust LSQ solution: (phi^T * phi)^-1 * phi^T * target
+                # We'll use torch.linalg.lstsq
+                new_coeffs_flat = torch.linalg.lstsq(phi_new_flat, target_flat.unsqueeze(-1)).solution
+                new_coeffs = new_coeffs_flat.view(self.n_regimes, self.hidden_dim, new_n_basis)
+                
+                self.coeffs = nn.Parameter(new_coeffs)
+            else:
+                # Naive extension: interpolate/pad coefficients
+                new_coeffs = torch.zeros(self.n_regimes, self.hidden_dim, new_n_basis, device=self.coeffs.device)
+                indices = torch.linspace(0, old_n_basis-1, new_n_basis, device=self.coeffs.device).long()
+                new_coeffs = self.coeffs.data[:, :, indices]
+                self.knots.data = new_knots
+                self.coeffs = nn.Parameter(new_coeffs)
+                self.n_basis = new_n_basis
+
+            self.sparsity_mask = torch.ones_like(self.coeffs)
 
     def update_sparsity_mask(self, threshold=0.01):
-        """Update mask based on Equation 22: w' = ReLU(|w| - theta)"""
+        """
+        Update coefficients and mask based on Equation 22: w' = sign(w) * ReLU(|w| - theta)
+        This implements soft-thresholding (proximal operator for L1).
+        """
         with torch.no_grad():
-            self.sparsity_mask.data = (torch.abs(self.coeffs) > threshold).float()
+            # Update the weights themselves as per Eq 22
+            abs_coeffs = torch.abs(self.coeffs)
+            new_coeffs = torch.sign(self.coeffs) * F.relu(abs_coeffs - threshold)
+            self.coeffs.data = new_coeffs
+            
+            # Update mask for visualization/pruning
+            self.sparsity_mask.data = (torch.abs(self.coeffs) > 0).float()
 
     def b_spline_basis(self, x, k):
         """
-        Iterative vectorized B-spline basis function calculation.
-        Modified to support regime-specific knots.
+        Fully vectorized B-spline basis function calculation.
         x: (batch, hidden_dim, 1)
         returns phi: (n_regimes, batch, hidden_dim, n_basis)
         """
+        # x is (batch, hidden_dim, 1)
         batch_size, hidden_dim, _ = x.shape
-        # x is (batch, hidden_dim) implicitly
-        x_val = x.squeeze(-1)
+        x_val = x # (batch, hidden_dim, 1)
         
-        # Output container for all regimes
-        all_regime_phi = []
+        # Knots: (n_regimes, hidden_dim, n_knots)
+        knots = self.knots # (R, H, K)
+        n_regimes = knots.size(0)
+        n_knots = knots.size(2)
         
-        for r in range(self.n_regimes):
-            # Knots for this regime: (hidden_dim, n_knots)
-            knots_r = self.knots[r]
-            n_knots = knots_r.size(1)
+        # Base case (order 0): phi_0 is 1 if knots[i] <= x < knots[i+1], else 0
+        # Broadcast x to (1, batch, hidden_dim, 1) and knots to (n_regimes, 1, hidden_dim, n_knots)
+        # Resulting phi: (n_regimes, batch, hidden_dim, n_knots - 1)
+        phi = ((x_val.unsqueeze(0) >= knots.unsqueeze(1)[:, :, :, :-1]) & 
+               (x_val.unsqueeze(0) < knots.unsqueeze(1)[:, :, :, 1:])).float()
+        
+        # Cox-de Boor recursion
+        for deg in range(1, k + 1):
+            n_basis_step = phi.size(-1)
             
-            # Base case (order 0): (batch, hidden_dim, n_knots - 1)
-            # x_val: (batch, hidden_dim), knots_r: (hidden_dim, n_knots)
-            # Broadcast comparison
-            p_0 = ((x_val.unsqueeze(-1) >= knots_r[:, :-1].unsqueeze(0)) & 
-                   (x_val.unsqueeze(-1) < knots_r[:, 1:].unsqueeze(0))).float()
+            # k_i: t_i for i=0..N-2
+            k_i = knots[:, :, :n_basis_step-1].unsqueeze(1)
+            # k_id: t_{i+deg} for i=0..N-2
+            k_id = knots[:, :, deg:n_basis_step+deg-1].unsqueeze(1)
+            # k_i1: t_{i+1} for i=0..N-2
+            k_i1 = knots[:, :, 1:n_basis_step].unsqueeze(1)
+            # k_id1: t_{i+deg+1} for i=0..N-2
+            k_id1 = knots[:, :, deg+1:n_basis_step+deg].unsqueeze(1)
             
-            # Current level phi
-            phi_current = p_0 
+            # phi_left: B_{i, d-1} for i=0..N-2
+            phi_left = phi[:, :, :, :-1]
+            # phi_right: B_{i+1, d-1} for i=0..N-2
+            phi_right = phi[:, :, :, 1:]
             
-            # Recursively build higher degrees
-            for deg in range(1, k + 1):
-                # deg reduce the number of basis functions by 1 in each step
-                # knots_r: (hidden_dim, n_knots)
-                # phi_current: (batch, hidden_dim, n_basis_current)
-                n_basis_current = phi_current.size(-1)
-                new_phi = torch.zeros(batch_size, hidden_dim, n_basis_current - 1, device=x.device)
-                
-                for i in range(n_basis_current - 1):
-                    # Cox-de Boor recursion
-                    left_num = x_val - knots_r[:, i].unsqueeze(0)
-                    left_denom = (knots_r[:, i + deg] - knots_r[:, i]).unsqueeze(0) + 1e-8
-                    left = (left_num / left_denom) * phi_current[:, :, i]
-                    
-                    right_num = knots_r[:, i + deg + 1].unsqueeze(0) - x_val
-                    right_denom = (knots_r[:, i + deg + 1] - knots_r[:, i + 1]).unsqueeze(0) + 1e-8
-                    right = (right_num / right_denom) * phi_current[:, :, i + 1]
-                    
-                    new_phi[:, :, i] = left + right
-                phi_current = new_phi
-                
-            all_regime_phi.append(phi_current)
+            denom1 = (k_id - k_i)
+            term1 = ((x_val.unsqueeze(0) - k_i) / (denom1 + 1e-8)) * phi_left
             
-        # Stack to (n_regimes, batch, hidden_dim, n_basis)
-        return torch.stack(all_regime_phi, dim=0)
+            denom2 = (k_id1 - k_i1)
+            term2 = ((k_id1 - x_val.unsqueeze(0)) / (denom2 + 1e-8)) * phi_right
+            
+            phi = term1 + term2
+            
+        return phi
 
     def forward(self, h, regime_probs):
         # h: (batch, hidden_dim)
