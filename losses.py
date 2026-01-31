@@ -4,29 +4,98 @@ import torch.nn.functional as F
 
 def contrastive_loss(embeddings, regime_probs, margin=1.0, lambda_gp=0.1):
     """
-    Enforces separation between different regimes in the latent space.
-    Uses soft regime probabilities to weight the distances.
-    Includes gradient penalty to prevent embedding collapse.
+    Equation 18: Contrastive Loss for Regime Separation
+    
+    L_contrastive = E[||z_i - z_j||^2 * y_ij]
+    
+    where:
+    - z_i, z_j: latent embeddings from spline-based regime detection layer
+    - y_ij: indicator function (1 if same regime, 0 if different regimes)
+    - E: expectation over training mini-batch B
+    
+    Purpose: Enforces orthogonality in the latent space, improving separability between regimes.
+    
+    Args:
+        embeddings: (batch, hidden_dim) - Latent embeddings z from Φ_detect(x)
+        regime_probs: (batch, n_regimes) - Soft regime assignments from Gumbel Softmax
+        margin: float - Margin for dissimilar samples (not used in Eq 18, kept for compatibility)
+        lambda_gp: float - Gradient penalty weight to prevent embedding collapse
+    
+    Returns:
+        loss: scalar - Contrastive loss value
     """
-    # pairwise distances between embeddings
-    # embeddings: (batch, hidden_dim)
-    dist_matrix = torch.cdist(embeddings, embeddings, p=2)
+    batch_size = embeddings.size(0)
     
-    # pairwise similarity based on regime probs
+    # ============================================================
+    # STEP 1: Compute pairwise distances ||z_i - z_j||^2
+    # ============================================================
+    # dist_matrix[i, j] = ||z_i - z_j||^2
+    dist_matrix = torch.cdist(embeddings, embeddings, p=2).pow(2)  # (batch, batch)
+    
+    # ============================================================
+    # STEP 2: Compute regime similarity indicator y_ij
+    # ============================================================
+    # Paper: y_ij indicates if samples i and j belong to same regime
+    # Using soft assignment: y_ij = sum_k p_{ik} * p_{jk}
+    # This is differentiable approximation to hard indicator
+    
     # regime_probs: (batch, n_regimes)
-    # similarity[i, j] = sum_k p_{ik} * p_{jk}
-    similarity = torch.matmul(regime_probs, regime_probs.t())
+    # similarity[i, j] = sum_k prob[i,k] * prob[j,k]
+    y_ij = torch.matmul(regime_probs, regime_probs.t())  # (batch, batch)
     
-    # Loss: pull similar ones together, push dissimilar ones apart
-    # L = similarity * dist^2 + (1 - similarity) * max(0, margin - dist)^2
-    loss = similarity * torch.pow(dist_matrix, 2) + \
-           (1 - similarity) * torch.pow(F.relu(margin - dist_matrix), 2)
-           
-    # Add gradient penalty to prevent embedding collapse (encourage unit norm)
+    # ============================================================
+    # STEP 3: Equation 18 - Contrastive Loss
+    # L_contrastive = E[||z_i - z_j||^2 * y_ij]
+    # ============================================================
+    # Interpretation:
+    # - If y_ij = 1 (same regime): penalize large distance (pull together)
+    # - If y_ij = 0 (different regime): no penalty (allow separation)
+    
+    contrastive_term = dist_matrix * y_ij
+    
+    # Expectation over mini-batch (exclude diagonal i=j)
+    mask = (1 - torch.eye(batch_size, device=embeddings.device))
+    loss = (contrastive_term * mask).sum() / (mask.sum() + 1e-8)
+    
+    # ============================================================
+    # ADDITIONAL: Gradient Penalty (not in Eq 18, for stability)
+    # ============================================================
+    # Prevent embedding collapse by encouraging unit norm
     embedding_norm = torch.norm(embeddings, p=2, dim=1).mean()
     gradient_penalty = torch.abs(embedding_norm - 1.0)
     
-    return loss.mean() + lambda_gp * gradient_penalty
+    return loss + lambda_gp * gradient_penalty
+
+def contrastive_loss_hard(embeddings, regime_assignments):
+    """
+    Alternative: Hard contrastive loss using discrete regime assignments.
+    Useful for evaluation or when using hard Gumbel Softmax.
+    
+    Args:
+        embeddings: (batch, hidden_dim)
+        regime_assignments: (batch,) - Hard regime labels (integers)
+    
+    Returns:
+        loss: scalar
+    """
+    batch_size = embeddings.size(0)
+    
+    # Pairwise distances
+    dist_matrix = torch.cdist(embeddings, embeddings, p=2).pow(2)
+    
+    # Hard indicator: y_ij = 1 if regime[i] == regime[j], else 0
+    regime_i = regime_assignments.unsqueeze(1)  # (batch, 1)
+    regime_j = regime_assignments.unsqueeze(0)  # (1, batch)
+    y_ij = (regime_i == regime_j).float()  # (batch, batch)
+    
+    # Contrastive loss
+    contrastive_term = dist_matrix * y_ij
+    
+    # Average over pairs (exclude diagonal)
+    mask = (1 - torch.eye(batch_size, device=embeddings.device))
+    loss = (contrastive_term * mask).sum() / (mask.sum() + 1e-8)
+    
+    return loss
 
 def contrastive_regime_loss(regime_probs, y_true, margin=0.5):
     """
@@ -103,12 +172,21 @@ def regime_balance_loss(regime_probs):
     """
     Prevents the model from collapsing into a single regime.
     Enforces uniform distribution of regime assignments on average.
+    
+    Args:
+        regime_probs: (batch, n_regimes) - Soft regime probabilities from Gumbel Softmax
+    
+    Returns:
+        kl_div: scalar - KL divergence from uniform distribution
     """
-    avg_probs = torch.mean(regime_probs, dim=0)
+    # Average regime probabilities over batch
+    avg_probs = torch.mean(regime_probs, dim=0)  # (n_regimes,)
+    
+    # Target: uniform distribution
     uniform_target = torch.full_like(avg_probs, 1.0 / regime_probs.size(1))
     
-    # KL Divergence from uniform: sum(target * log(target/avg))
-    # We want to minimize this
+    # KL Divergence: KL(Uniform || Observed) = sum(p * log(p/q))
+    # We want to minimize this to match uniform distribution
     kl_div = torch.sum(uniform_target * torch.log(uniform_target / (avg_probs + 1e-8)))
     return kl_div
 
@@ -119,13 +197,24 @@ def composite_loss(y_pred, y_true, embeddings, regime_probs, model,
                    lambda_orth=0.15,       # ⬆️ Increased from 0.05 (force regime separation)
                    lambda_balance=0.30):   # ⬆️ Increased from 0.15 (heavily penalize imbalance)
     """
-    Full training objective: L = Huber + L1 + Contrastive + Orthogonal + Balance
+    Full training objective combining all loss components.
+    
+    L_total = L_Huber + λ_contr * L_contrastive + λ_L1 * L_sparse + 
+              λ_orth * L_orthogonality + λ_balance * L_balance
+    
+    Components:
+    - L_Huber: Prediction error (robust to outliers)
+    - L_contrastive: Equation 18 - Regime separation in embedding space
+    - L_sparse: L1 regularization on forecasting coefficients
+    - L_orthogonality: Forces regime-specific weights to be orthogonal
+    - L_balance: Prevents regime collapse (KL divergence from uniform)
+    
     Updated with aggressive parameters to prevent regime collapse and encourage bolder predictions.
     """
-    # Huber Loss for robustness
+    # Huber Loss for robustness to outliers
     l_huber = F.huber_loss(y_pred.squeeze(), y_true.squeeze(), delta=delta)
     
-    # Contrastive Loss
+    # Contrastive Loss (Equation 18)
     l_contr = contrastive_loss(embeddings, regime_probs)
     
     # L1 Regularization (Sparsity on forecasting coefficients)
@@ -141,7 +230,9 @@ def composite_loss(y_pred, y_true, embeddings, regime_probs, model,
     # Balance Loss
     l_balance = regime_balance_loss(regime_probs)
     
+    # ============================================================
     # DETECT REGIME COLLAPSE (Reviewer-driven Fix #3)
+    # ============================================================
     # If any regime is ignored (max prob never points to it), heavily penalize
     regime_assignments = regime_probs.argmax(dim=1)
     unique_regimes = torch.unique(regime_assignments)
@@ -157,7 +248,7 @@ def composite_loss(y_pred, y_true, embeddings, regime_probs, model,
     regime_entropy = -torch.sum(
         regime_probs.mean(dim=0) * torch.log(regime_probs.mean(dim=0) + 1e-8)
     )
-    max_entropy = torch.log(torch.tensor(regime_probs.size(1), dtype=torch.float))
+    max_entropy = torch.log(torch.tensor(regime_probs.size(1), dtype=torch.float, device=regime_probs.device))
     
     entropy_penalty_multiplier = 1.0
     if regime_entropy / max_entropy < 0.5:
