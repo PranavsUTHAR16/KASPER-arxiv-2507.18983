@@ -5,69 +5,147 @@ import numpy as np
 
 class SplineActivation(nn.Module):
     """
-    Hybrid activation function combining linear and cubic components.
-    f(x) = L(x) + C(x)
+    Hybrid spline activation function as per KASPER paper Equations 14-16.
+    
+    Equation 14: f(x) = L(x) + C(x)
+    
+    Equation 15 (Linear): 
+        L(x) = sum_{m=0}^{N_linear-1} tanh(w_m) * [ReLU(x_norm - k_m) - ReLU(x_norm - k_{m+1})]
+    
+    Equation 16 (Cubic):
+        C(x) = sum_{m=0}^{N_cubic-1} sigma(v_m) * x_norm^3
+    
+    Knots {k_m} placed on uniform grid bounded by empirical percentiles:
+        k_m = x_min + (m-1) * (x_max - x_min) / (G-1)
+    where x_min = quantile(x, p_min), x_max = quantile(x, p_max)
     """
-    def __init__(self, input_dim, n_linear=3, n_cubic=2, initialization='quantile'):
+    def __init__(self, input_dim, n_linear=10, n_cubic=5, p_min=0.01, p_max=0.99):
         super(SplineActivation, self).__init__()
         self.input_dim = input_dim
-        self.n_linear = n_linear
-        self.n_cubic = n_cubic
+        self.n_linear = n_linear  # N_linear (number of linear basis functions)
+        self.n_cubic = n_cubic    # N_cubic (number of cubic basis functions)
+        self.p_min = p_min        # Lower percentile (default: 1st percentile)
+        self.p_max = p_max        # Upper percentile (default: 99th percentile)
         
-        # Learnable parameters for linear component
-        self.w_linear = nn.Parameter(torch.randn(input_dim, n_linear))
-        # Learnable parameters for cubic component
-        self.v_cubic = nn.Parameter(torch.randn(input_dim, n_cubic))
+        # Grid size G = n_linear + 1 (number of knots for linear component)
+        self.grid_size = n_linear + 1
         
-        # Per-feature knots (Fix 3)
+        # Trainable parameters for LINEAR component (Equation 15)
+        # w_m for m = 0, ..., N_linear-1
+        self.w_linear = nn.Parameter(torch.randn(input_dim, n_linear) * 0.1)
+        
+        # Trainable parameters for CUBIC component (Equation 16)
+        # v_m for m = 0, ..., N_cubic-1  
+        self.v_cubic = nn.Parameter(torch.randn(input_dim, n_cubic) * 0.1)
+        
+        # Knot positions: (input_dim, grid_size)
+        # Each feature has its own knot sequence
         self.register_buffer(
             'knots', 
-            torch.linspace(-1, 1, n_linear + 1).unsqueeze(0).repeat(input_dim, 1)
+            torch.linspace(-1, 1, self.grid_size).unsqueeze(0).repeat(input_dim, 1)
         )
+        
+        # Min/max bounds for normalization (fitted during fit_knots)
+        self.register_buffer('x_min', torch.zeros(input_dim))
+        self.register_buffer('x_max', torch.ones(input_dim))
         
     def fit_knots(self, x):
         """
-        Initializes knots PER FEATURE using 1st-99th percentiles (as per author response).
-        Ensures robust scaling for financial return distributions.
+        Initializes knots per feature using empirical percentiles.
+        
+        As per paper:
+        k_m = x_min + (m-1) * (x_max - x_min) / (G-1)
+        where:
+        - x_min = quantile(x, p_min)  # e.g., 1st percentile
+        - x_max = quantile(x, p_max)  # e.g., 99th percentile
+        - G = n_linear + 1 (grid size)
+        
+        This ensures robustness to outliers by clipping extreme values.
+        
+        Args:
+            x: (N, input_dim) tensor of input features
         """
         with torch.no_grad():
             for i in range(self.input_dim):
-                # Use 1st and 99th percentile as bounds
-                p_low = torch.quantile(x[:, i], 0.01)   # 1st percentile
-                p_high = torch.quantile(x[:, i], 0.99)  # 99th percentile
+                # Compute empirical percentiles
+                x_min_i = torch.quantile(x[:, i], self.p_min)  # e.g., 1st percentile
+                x_max_i = torch.quantile(x[:, i], self.p_max)  # e.g., 99th percentile
                 
-                # Place knots uniformly between bounds (as per Eq 21 clarification)
-                knot_positions = torch.linspace(0, 1, self.n_linear + 1, device=x.device)
-                self.knots.data[i] = p_low + knot_positions * (p_high - p_low)
+                # Store bounds for normalization
+                self.x_min[i] = x_min_i
+                self.x_max[i] = x_max_i
                 
-                # Optional logging for knot health
-                if i < 3: # Log first 3 features
-                    print(f"  Feature {i}: knots initialized from {p_low:.4f} to {p_high:.4f}")
+                # Place knots uniformly on grid [x_min, x_max]
+                # k_m = x_min + (m-1) * (x_max - x_min) / (G-1) for m = 1, ..., G
+                # In 0-indexed: k_m = x_min + m * (x_max - x_min) / (G-1) for m = 0, ..., G-1
+                knot_positions = torch.linspace(0, 1, self.grid_size, device=x.device)
+                self.knots.data[i] = x_min_i + knot_positions * (x_max_i - x_min_i)
+                
+                # Log first 3 features for verification
+                if i < 3:
+                    print(f"  Feature {i}: knots [{x_min_i:.4f}, ..., {x_max_i:.4f}] (G={self.grid_size})")
         
     def forward(self, x):
-        # x: (batch, input_dim)
-        x_expanded = x.unsqueeze(-1) # (batch, in, 1)
-        # knots_expanded: (1, in, n_linear+1) matches self.knots if expanded correctly
-        knots_expanded = self.knots.unsqueeze(0) 
+        """
+        Forward pass implementing Equations 14-16.
         
-        # Equation 15: Linear Component (Piecewise Linear Ramp)
-        # Using per-feature knots
-        diffs = F.relu(x_expanded - knots_expanded[:, :, :-1]) - F.relu(x_expanded - knots_expanded[:, :, 1:])
-        linear_out = torch.sum(torch.tanh(self.w_linear).unsqueeze(0) * diffs, dim=-1)
+        Args:
+            x: (batch, input_dim) input features
+            
+        Returns:
+            f(x) = L(x) + C(x): (batch, input_dim) activated features
+        """
+        # Normalize input to knot range for each feature
+        # x_norm[i] is clipped to [x_min[i], x_max[i]] for numerical stability
+        x_norm = torch.clamp(x, self.x_min.unsqueeze(0), self.x_max.unsqueeze(0))
         
-        # Equation 16: Cubic Component
-        # sigma(vi) * x^3
-        # Assuming n_cubic is 1 for direct Eq 16 compliance
-        x_cubic = x.pow(3).unsqueeze(-1) 
-        cubic_out = torch.sigmoid(self.v_cubic).unsqueeze(0) * x_cubic
-        cubic_out = cubic_out.sum(dim=-1)
+        # ============================================================
+        # Equation 15: LINEAR COMPONENT
+        # L(x) = sum_{m=0}^{N_linear-1} tanh(w_m) * [ReLU(x_norm - k_m) - ReLU(x_norm - k_{m+1})]
+        # ============================================================
         
-        return linear_out + cubic_out
+        x_expanded = x_norm.unsqueeze(-1)  # (batch, input_dim, 1)
+        knots_expanded = self.knots.unsqueeze(0)  # (1, input_dim, grid_size)
+        
+        # Compute piecewise linear ramps: ReLU(x - k_m) - ReLU(x - k_{m+1})
+        # For m = 0, ..., N_linear-1 (which is grid_size - 1)
+        ramps = (
+            F.relu(x_expanded - knots_expanded[:, :, :-1]) - 
+            F.relu(x_expanded - knots_expanded[:, :, 1:])
+        )  # (batch, input_dim, N_linear)
+        
+        # Weight each ramp by tanh(w_m) and sum
+        # tanh constrains weights to [-1, 1] for stability
+        w_tanh = torch.tanh(self.w_linear)  # (input_dim, N_linear)
+        linear_component = torch.sum(w_tanh.unsqueeze(0) * ramps, dim=-1)  # (batch, input_dim)
+        
+        # ============================================================
+        # Equation 16: CUBIC COMPONENT
+        # C(x) = sum_{m=0}^{N_cubic-1} sigma(v_m) * x_norm^3
+        # ============================================================
+        
+        x_cubic = x_norm.pow(3)  # (batch, input_dim)
+        
+        # Weight each x^3 by sigma(v_m) and sum
+        # sigma (sigmoid) constrains weights to [0, 1]
+        v_sigmoid = torch.sigmoid(self.v_cubic)  # (input_dim, N_cubic)
+        cubic_component = torch.sum(
+            v_sigmoid.unsqueeze(0) * x_cubic.unsqueeze(-1), dim=-1
+        )  # (batch, input_dim)
+        
+        # ============================================================
+        # Equation 14: COMBINE COMPONENTS
+        # f(x) = L(x) + C(x)
+        # ============================================================
+        
+        output = linear_component + cubic_component
+        
+        return output
 
 class RegimeDetectionLayer(nn.Module):
     """
     KAN Layer 1: Regime Detection
-    Architecture: (L -> BN -> GELU -> Dropout) x 2 -> L -> GS
+    Architecture: SplineAct -> (L -> BN -> GELU -> Dropout) x 2 -> L -> Gumbel-Softmax
     """
     def __init__(self, input_dim, hidden_dim=64, n_regimes=3, temperature=0.5):
         super(RegimeDetectionLayer, self).__init__()
