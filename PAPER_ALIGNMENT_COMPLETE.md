@@ -10,6 +10,7 @@ Your KASPER implementation now **exactly matches the paper specification** acros
 | **Spline Activation** | Equations 14-16 | ✅ Complete | [SPLINE_EQUATIONS_ALIGNMENT.md](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/blob/main/SPLINE_EQUATIONS_ALIGNMENT.md) |
 | **Regime Classification** | Equation 17 | ✅ Complete | [REGIME_CLASSIFICATION_ALIGNMENT.md](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/blob/main/REGIME_CLASSIFICATION_ALIGNMENT.md) |
 | **Contrastive Loss** | Equation 18 | ✅ Complete | [REGIME_CLASSIFICATION_ALIGNMENT.md](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/blob/main/REGIME_CLASSIFICATION_ALIGNMENT.md) |
+| **Orthogonality Regularization** | Equation 19 | ✅ Complete | [ORTHOGONALITY_EQUATION_19.md](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/blob/main/ORTHOGONALITY_EQUATION_19.md) |
 | **Regime Health Detection** | Custom | ✅ Complete | [DIAGNOSIS.md](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/blob/main/DIAGNOSIS.md) |
 
 ---
@@ -138,6 +139,47 @@ loss = (dist_matrix * y_ij * mask).sum() / mask.sum()
 
 ---
 
+### Equation 19: Orthogonality Regularization
+
+**Paper Specification:**
+```
+L_orth = E[||W_r * W_r^T - I||²_F]
+
+where:
+  W_r ∈ R^{1×F}: Regime-specific weight vector
+  W_r = [w_1^(r), w_2^(r), ..., w_F^(r)]
+  ||·||_F: Frobenius norm
+  I: Identity matrix
+```
+
+**Implementation:** `src/kasper/models/kan_layers.py` → `RegimeDetectionLayer.orthogonality_loss()`
+
+```python
+def orthogonality_loss(self):
+    # W: (n_regimes, hidden_dim)
+    W = self.regime_logits.weight
+    
+    # Gram matrix: G = W * W^T
+    gram = torch.mm(W, W.t())
+    
+    # Target: Identity (perfect orthogonality)
+    identity = torch.eye(W.size(0), device=W.device)
+    
+    # Frobenius norm squared: ||Gram - I||²_F
+    loss = torch.norm(gram - identity, p='fro') ** 2
+    
+    return loss
+```
+
+**Purpose:** Enforces that regime weight vectors are orthogonal, ensuring distinct market patterns
+
+**Intuition:**
+- Gram[i,j] = 0 (i≠j): Regimes focus on different features
+- Gram[i,i] = 1: Weight vectors have unit norm
+- Together: Regimes are maximally distinct
+
+---
+
 ## 🔧 Implementation Files
 
 ### Core Architecture
@@ -148,7 +190,7 @@ KASPER_arxiv_2507.18983/
 ├── losses.py                       # Equation 18 implementation
 ├── trainer.py                      # Training loop with regime health checks
 ├── src/kasper/models/
-│   └── kan_layers.py               # Equations 14-17 implementation
+│   └── kan_layers.py               # Equations 14-17, 19 implementation
 └── main.py                         # Pipeline orchestration
 ```
 
@@ -158,6 +200,7 @@ KASPER_arxiv_2507.18983/
 ├── EQUATION_13_ALIGNMENT.md        # Feature engineering (Eq 13)
 ├── SPLINE_EQUATIONS_ALIGNMENT.md   # Spline activation (Eq 14-16)
 ├── REGIME_CLASSIFICATION_ALIGNMENT.md  # Gumbel Softmax + Contrastive (Eq 17-18)
+├── ORTHOGONALITY_EQUATION_19.md    # Orthogonality regularization (Eq 19)
 ├── DIAGNOSIS.md                    # Regime collapse analysis
 ├── BUGFIX_SUMMARY.md               # Data shuffling bug fix
 ├── QUICKSTART_FIX.md               # Training guide
@@ -185,9 +228,9 @@ KASPER_arxiv_2507.18983/
    - Embeddings: z = Φ_detect(x)
    - Gumbel Softmax: P(regime|x)
           ↓
-5. Contrastive Loss (Equation 18)
-   - Pulls same-regime embeddings together
-   - Allows different-regime separation
+5. Loss Components:
+   - Contrastive (Eq 18): Embedding separation
+   - Orthogonality (Eq 19): Weight separation
           ↓
 6. Regime-Specific Forecasting
    - B-spline basis functions
@@ -234,6 +277,14 @@ KASPER_arxiv_2507.18983/
 - [x] Excludes diagonal (i ≠ j)
 - [x] Gradient penalty for stability
 
+### Orthogonality Regularization (Equation 19)
+- [x] Gram matrix computation (W * W^T)
+- [x] Frobenius norm loss
+- [x] Identity target matrix
+- [x] Applied to regime_logits.weight
+- [x] Weighted by λ_orth = 0.15
+- [x] Dynamic penalty on collapse (5x)
+
 ### Training Infrastructure
 - [x] Composite loss with all components
 - [x] Regime health monitoring
@@ -253,10 +304,14 @@ KASPER_arxiv_2507.18983/
 3. **[92a0097](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/commit/92a0097c5dff2776bb764b0d71182f008209e366)** - Implement Equations 14-16
 4. **[231d25c](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/commit/231d25c50e3926db2318a7a8cca3fd4125fdda4b)** - Document Equations 14-16
 
-### Session 3: Regime Classification
+### Session 3: Regime Classification & Contrastive Loss
 5. **[a8702c0](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/commit/a8702c03419c51d7d0264b59016dc1ba8f682723)** - Implement Equation 18 (Contrastive Loss)
 6. **[11fc610](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/commit/11fc610b6c6d0666d13aa7dbebb1c18c81ccc54c)** - Document Equations 17-18
-7. **[current]** - Complete alignment summary
+7. **[4e2bd51](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/commit/4e2bd5175dae24fed2a26f29108b273d3a57e248)** - Complete alignment summary
+
+### Session 4: Orthogonality Regularization
+8. **[607ff13](https://github.com/PranavsUTHAR16/KASPER_arxiv_2507.18983/commit/607ff133400bfe89a61299fb413da7d01179fe96)** - Document Equation 19
+9. **[current]** - Update complete alignment summary
 
 ---
 
@@ -285,6 +340,7 @@ python main.py 2>&1 | tee training.log
 **During Training:**
 - Regime distribution: Should stay balanced (20-40% each)
 - Contrastive loss: Should decrease from ~2.5 to <0.5
+- Orthogonality loss: Should decrease from ~1.5 to <0.1
 - Temperature: Should decay smoothly (2.0 → 0.5)
 - Regime entropy: Should stay >0.7 of max entropy
 
@@ -303,6 +359,7 @@ python main.py 2>&1 | tee training.log
 | 3.1.1 | Spline Activation Function | Equations 14-16 | ✅ Complete |
 | 3.1.2 | Differentiable Regime Classification | Equation 17 | ✅ Complete |
 | 3.1.3 | Contrastive Loss for Regime Separation | Equation 18 | ✅ Complete |
+| 3.1.4 | Orthogonality Regularization | Equation 19 | ✅ Complete |
 | 4.1 | Data & Features | Equation 13 | ✅ Complete |
 | 4.2 | Training | Composite loss + health checks | ✅ Complete |
 | 4.3 | Evaluation | Metrics (R², Sharpe, etc.) | ✅ Complete |
@@ -355,6 +412,12 @@ Regime health: All active   ✅ No collapse
 2. Verify BatchNorm is active
 3. Increase λ_contr to 0.10
 
+### If High Orthogonality Loss:
+1. Check Gram matrix: diagonal should be ~1
+2. Off-diagonal should be <0.2
+3. Increase λ_orth to 0.25
+4. Verify orthogonal initialization
+
 ### If Poor Separation:
 1. Check knot initialization logs
 2. Verify percentile bounds (should see reasonable ranges)
@@ -368,17 +431,20 @@ Regime health: All active   ✅ No collapse
 1. **Section 3.1.1** - Understand spline basis functions
 2. **Section 3.1.2** - Understand Gumbel Softmax trick
 3. **Section 3.1.3** - Understand contrastive learning
-4. **Section 4** - Compare your results to paper
+4. **Section 3.1.4** - Understand orthogonality constraints
+5. **Section 4** - Compare your results to paper
 
 ### Related Papers
 1. **Gumbel Softmax:** Jang et al. (2017)
 2. **Contrastive Learning:** Chen et al. (2020) - SimCLR
 3. **KAN:** Liu et al. (2024) - Kolmogorov-Arnold Networks
+4. **Orthogonal Constraints:** Saxe et al. (2014) - Exact solutions to the nonlinear dynamics of learning
 
 ### Mathematical Background
 1. **B-splines:** De Boor (2001) - A Practical Guide to Splines
 2. **Temperature in Softmax:** Hinton et al. (2015) - Distilling Knowledge
 3. **Metric Learning:** Kulis (2013) - Metric Learning Survey
+4. **Matrix Analysis:** Horn & Johnson (2012) - Matrix Analysis
 
 ---
 
@@ -390,15 +456,16 @@ Regime health: All active   ✅ No collapse
 ✅ **Spline Activation** - Equations 14-16  
 ✅ **Regime Classification** - Equation 17  
 ✅ **Contrastive Loss** - Equation 18  
+✅ **Orthogonality Regularization** - Equation 19  
 ✅ **Regime Health Monitoring** - Custom safeguards  
 ✅ **Complete Documentation** - All equations explained  
 
-**Ready for training and evaluation!** 🚀
+**All major equations (13-19) implemented and documented!** 🎉
 
 ---
 
-**Last Updated:** January 31, 2026, 6:09 AM IST  
-**Total Commits:** 7  
+**Last Updated:** January 31, 2026, 6:17 AM IST  
+**Total Commits:** 9  
 **Files Modified:** 4  
-**Documentation Created:** 5  
-**Status:** 🎉 **COMPLETE** 🎉
+**Documentation Created:** 6  
+**Status:** 🎉 **COMPLETE - ALL EQUATIONS ALIGNED** 🎉
